@@ -19,6 +19,7 @@ type WatcherConfig struct {
 	WatcherType string `json:"watcher_type"`
 	FileDir     string `json:"file_dir"`
 	Function    string `json:"function"`
+	Output      string `json:"output"`
 }
 
 func Load(path string) ([]WatcherConfig, error) {
@@ -50,6 +51,7 @@ func normalizeAndValidate(w *WatcherConfig) error {
 	w.WatcherType = strings.TrimSpace(w.WatcherType)
 	w.FileDir = strings.TrimSpace(w.FileDir)
 	w.Function = strings.TrimSpace(w.Function)
+	w.Output = strings.TrimSpace(w.Output)
 
 	if w.Name == "" {
 		return errors.New("name is required")
@@ -69,6 +71,14 @@ func normalizeAndValidate(w *WatcherConfig) error {
 		return fmt.Errorf("resolve file_dir %q: %w", w.FileDir, err)
 	}
 	w.FileDir = abs
+
+	if w.Output != "" {
+		absOutput, err := filepath.Abs(w.Output)
+		if err != nil {
+			return fmt.Errorf("resolve output %q: %w", w.Output, err)
+		}
+		w.Output = absOutput
+	}
 
 	return nil
 }

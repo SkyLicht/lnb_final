@@ -42,16 +42,17 @@ func main() {
 	defer stop()
 
 	fileProcessor := processor.New(log, parser.NewDispatcher(), processor.Options{
-		Workers:        settings.Workers,
-		QueueSize:      settings.QueueSize,
-		StableDuration: settings.StableFor,
-		RetryDelay:     settings.RetryDelay,
-		MaxRetries:     settings.MaxRetries,
+		Workers:         settings.Workers,
+		QueueSize:       settings.QueueSize,
+		StableDuration:  settings.StableFor,
+		RetryDelay:      settings.RetryDelay,
+		MaxRetries:      settings.MaxRetries,
+		MetricsInterval: settings.MetricsInterval,
 	})
 	fileProcessor.Start(ctx)
 	defer fileProcessor.Stop()
 
-	manager := watcher.NewManager(log, watcherConfigs, fileProcessor)
+	manager := watcher.NewManager(log, watcherConfigs, fileProcessor, settings.ScanInterval)
 	defer manager.Close()
 
 	if err := manager.Start(ctx); err != nil {

@@ -12,6 +12,7 @@ type Request struct {
 	FilePath    string
 	Content     []byte
 	Log         Logger
+	OutputDir   string
 }
 
 type Result struct {

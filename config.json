@@ -3,6 +3,7 @@
     "name": "J01_LNB_BOT",
     "watcher_type": "on_file_created",
     "file_dir": "Z:\\",
-    "function": "npm_type1"
+    "function": "npm_type1",
+    "output": "C:\\data"
   }
 ]

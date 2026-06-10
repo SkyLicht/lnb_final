@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"lnb_tk/internal/logger"
@@ -20,14 +21,16 @@ type Job struct {
 	FilePath       string
 	ParserFunction string
 	ErrorDir       string
+	OutputDir      string
 }
 
 type Options struct {
-	Workers        int
-	QueueSize      int
-	StableDuration time.Duration
-	RetryDelay     time.Duration
-	MaxRetries     int
+	Workers         int
+	QueueSize       int
+	StableDuration  time.Duration
+	RetryDelay      time.Duration
+	MaxRetries      int
+	MetricsInterval time.Duration
 }
 
 type Processor struct {
@@ -40,6 +43,15 @@ type Processor struct {
 
 	mu       sync.Mutex
 	inFlight map[string]struct{}
+	stats    stats
+}
+
+type stats struct {
+	submitted uint64
+	duplicate uint64
+	queueFull uint64
+	processed uint64
+	failed    uint64
 }
 
 func New(log *logger.Logger, dispatcher *parser.Dispatcher, opts Options) *Processor {
@@ -60,6 +72,10 @@ func (p *Processor) Start(ctx context.Context) {
 		p.wg.Add(1)
 		go p.worker(ctx, workerID)
 	}
+	if p.opts.MetricsInterval > 0 {
+		p.wg.Add(1)
+		go p.metricsLoop(ctx)
+	}
 }
 
 func (p *Processor) Stop() {
@@ -78,6 +94,7 @@ func (p *Processor) Submit(job Job) bool {
 	p.mu.Lock()
 	if _, exists := p.inFlight[job.FilePath]; exists {
 		p.mu.Unlock()
+		atomic.AddUint64(&p.stats.duplicate, 1)
 		return false
 	}
 	p.inFlight[job.FilePath] = struct{}{}
@@ -85,9 +102,11 @@ func (p *Processor) Submit(job Job) bool {
 
 	select {
 	case p.queue <- job:
+		atomic.AddUint64(&p.stats.submitted, 1)
 		return true
 	default:
 		p.release(job.FilePath)
+		atomic.AddUint64(&p.stats.queueFull, 1)
 		p.log.Errorf("watcher=%s file=%s queue is full; event dropped", job.WatcherName, job.FilePath)
 		return false
 	}
@@ -110,11 +129,50 @@ func (p *Processor) worker(ctx context.Context, workerID int) {
 }
 
 func (p *Processor) handle(ctx context.Context, workerID int, job Job) {
-	if err := p.process(ctx, job); err != nil {
+	err := p.safeProcess(ctx, job)
+	if err != nil {
+		atomic.AddUint64(&p.stats.failed, 1)
 		p.log.Errorf("worker=%d watcher=%s file=%s failed: %v", workerID, job.WatcherName, job.FilePath, err)
 		return
 	}
+	atomic.AddUint64(&p.stats.processed, 1)
 	p.log.Infof("worker=%d watcher=%s file=%s processed and deleted", workerID, job.WatcherName, job.FilePath)
+}
+
+func (p *Processor) safeProcess(ctx context.Context, job Job) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic while processing file: %v", recovered)
+		}
+	}()
+	return p.process(ctx, job)
+}
+
+func (p *Processor) metricsLoop(ctx context.Context) {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(p.opts.MetricsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.done:
+			return
+		case <-ticker.C:
+			p.log.Infof(
+				"processor_stats submitted=%d processed=%d failed=%d duplicate=%d queue_full=%d in_flight=%d queue_depth=%d",
+				atomic.LoadUint64(&p.stats.submitted),
+				atomic.LoadUint64(&p.stats.processed),
+				atomic.LoadUint64(&p.stats.failed),
+				atomic.LoadUint64(&p.stats.duplicate),
+				atomic.LoadUint64(&p.stats.queueFull),
+				p.inFlightCount(),
+				len(p.queue),
+			)
+		}
+	}
 }
 
 func (p *Processor) process(ctx context.Context, job Job) error {
@@ -142,6 +200,7 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 		FilePath:    job.FilePath,
 		Content:     content,
 		Log:         p.log,
+		OutputDir:   job.OutputDir,
 	})
 	if err != nil {
 		if moved, moveErr := p.moveToErrorDir(job, err); moveErr != nil {
@@ -193,6 +252,12 @@ func (p *Processor) release(filePath string) {
 	p.mu.Lock()
 	delete(p.inFlight, filePath)
 	p.mu.Unlock()
+}
+
+func (p *Processor) inFlightCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.inFlight)
 }
 
 func waitForStableFile(ctx context.Context, path string, stableDuration time.Duration, retryDelay time.Duration, maxRetries int) error {
@@ -289,6 +354,9 @@ func withDefaults(opts Options) Options {
 	}
 	if opts.MaxRetries <= 0 {
 		opts.MaxRetries = 40
+	}
+	if opts.MetricsInterval < 0 {
+		opts.MetricsInterval = 0
 	}
 	return opts
 }

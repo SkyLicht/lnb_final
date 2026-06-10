@@ -10,12 +10,14 @@ import (
 )
 
 type Settings struct {
-	ConfigPath string
-	Workers    int
-	QueueSize  int
-	StableFor  time.Duration
-	RetryDelay time.Duration
-	MaxRetries int
+	ConfigPath      string
+	Workers         int
+	QueueSize       int
+	StableFor       time.Duration
+	RetryDelay      time.Duration
+	MaxRetries      int
+	ScanInterval    time.Duration
+	MetricsInterval time.Duration
 }
 
 func LoadFile(path string) error {
@@ -87,13 +89,25 @@ func LoadSettings() (Settings, error) {
 		return Settings{}, err
 	}
 
+	scanInterval, err := Duration("SCAN_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	metricsInterval, err := Duration("METRICS_INTERVAL", time.Minute)
+	if err != nil {
+		return Settings{}, err
+	}
+
 	return Settings{
-		ConfigPath: String("CONFIG_PATH", "config.json"),
-		Workers:    workers,
-		QueueSize:  queueSize,
-		StableFor:  stableFor,
-		RetryDelay: retryDelay,
-		MaxRetries: maxRetries,
+		ConfigPath:      String("CONFIG_PATH", "config.json"),
+		Workers:         workers,
+		QueueSize:       queueSize,
+		StableFor:       stableFor,
+		RetryDelay:      retryDelay,
+		MaxRetries:      maxRetries,
+		ScanInterval:    scanInterval,
+		MetricsInterval: metricsInterval,
 	}, nil
 }
 

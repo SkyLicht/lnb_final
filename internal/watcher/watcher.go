@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -18,16 +20,21 @@ type Manager struct {
 	log       *logger.Logger
 	watchers  []config.WatcherConfig
 	processor *processor.Processor
+	scanEvery time.Duration
 
 	mu      sync.Mutex
 	running []*directoryWatcher
 }
 
-func NewManager(log *logger.Logger, watchers []config.WatcherConfig, processor *processor.Processor) *Manager {
+func NewManager(log *logger.Logger, watchers []config.WatcherConfig, processor *processor.Processor, scanEvery time.Duration) *Manager {
+	if scanEvery < 0 {
+		scanEvery = 0
+	}
 	return &Manager{
 		log:       log,
 		watchers:  watchers,
 		processor: processor,
+		scanEvery: scanEvery,
 	}
 }
 
@@ -38,6 +45,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			cfg:       cfg,
 			log:       m.log,
 			processor: m.processor,
+			scanEvery: m.scanEvery,
 		}
 		if err := dw.start(ctx); err != nil {
 			m.log.Errorf("watcher=%s dir=%s failed to start: %v", cfg.Name, cfg.FileDir, err)
@@ -72,6 +80,7 @@ type directoryWatcher struct {
 	log       *logger.Logger
 	processor *processor.Processor
 	watcher   *fsnotify.Watcher
+	scanEvery time.Duration
 }
 
 func (w *directoryWatcher) start(ctx context.Context) error {
@@ -94,6 +103,7 @@ func (w *directoryWatcher) start(ctx context.Context) error {
 		return err
 	}
 
+	w.scanDirectory("startup")
 	go w.loop(ctx)
 	return nil
 }
@@ -105,11 +115,21 @@ func (w *directoryWatcher) close() {
 }
 
 func (w *directoryWatcher) loop(ctx context.Context) {
+	var scanTicker *time.Ticker
+	var scanC <-chan time.Time
+	if w.scanEvery > 0 {
+		scanTicker = time.NewTicker(w.scanEvery)
+		defer scanTicker.Stop()
+		scanC = scanTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			w.close()
 			return
+		case <-scanC:
+			w.scanDirectory("interval")
 		case event, ok := <-w.watcher.Events:
 			if !ok {
 				return
@@ -128,20 +148,49 @@ func (w *directoryWatcher) handleEvent(event fsnotify.Event) {
 	if !w.matches(event) {
 		return
 	}
-	if isDirectory(event.Name) {
+	w.submitPath(event.Name, event.Op.String())
+}
+
+func (w *directoryWatcher) scanDirectory(source string) {
+	entries, err := os.ReadDir(w.cfg.FileDir)
+	if err != nil {
+		w.log.Errorf("watcher=%s dir=%s scan=%s failed: %v", w.cfg.Name, w.cfg.FileDir, source, err)
 		return
 	}
 
+	submitted := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if w.submitPath(filepath.Join(w.cfg.FileDir, entry.Name()), source) {
+			submitted++
+		}
+	}
+	if submitted > 0 {
+		w.log.Infof("watcher=%s scan=%s queued=%d", w.cfg.Name, source, submitted)
+	}
+}
+
+func (w *directoryWatcher) submitPath(path string, source string) bool {
+	if isDirectory(path) {
+		return false
+	}
+	if shouldIgnoreFile(path) {
+		return false
+	}
 	errorDir := filepath.Join(w.cfg.FileDir, "error")
 	accepted := w.processor.Submit(processor.Job{
 		WatcherName:    w.cfg.Name,
-		FilePath:       event.Name,
+		FilePath:       path,
 		ParserFunction: w.cfg.Function,
 		ErrorDir:       errorDir,
+		OutputDir:      w.cfg.Output,
 	})
 	if accepted {
-		w.log.Infof("watcher=%s event=%s file=%s queued", w.cfg.Name, event.Op.String(), event.Name)
+		w.log.Infof("watcher=%s source=%s file=%s queued", w.cfg.Name, source, path)
 	}
+	return accepted
 }
 
 func (w *directoryWatcher) matches(event fsnotify.Event) bool {
@@ -158,4 +207,17 @@ func (w *directoryWatcher) matches(event fsnotify.Event) bool {
 func isDirectory(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+func shouldIgnoreFile(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	for _, suffix := range []string{".tmp", ".temp", ".part", ".crdownload"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }

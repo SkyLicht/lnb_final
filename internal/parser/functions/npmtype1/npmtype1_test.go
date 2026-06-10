@@ -2,9 +2,13 @@ package npmtype1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lnb_tk/internal/parser/types"
 )
@@ -12,6 +16,63 @@ import (
 type captureLogger struct {
 	infos  []string
 	errors []string
+}
+
+func TestParseTowerEventWritesOutputState(t *testing.T) {
+	log := &captureLogger{}
+	outputDir := t.TempDir()
+	content := []byte(`<?xml version="1.0" encoding="UTF-8"?><MachineEvent><Element><Date>2026/05/21,15:42:49</Date><MDLN>71100</MDLN><EventSerial>466554</EventSerial><EventCode>50</EventCode><EventDetailCode>000000</EventDetailCode><Stage>02</Stage><Lane>01</Lane><RedLightStatus>00</RedLightStatus><YellowLightStatus>00</YellowLightStatus><GreenLightStatus>01</GreenLightStatus><ReserveLightStatus>00</ReserveLightStatus><BuzzerStatus>00</BuzzerStatus><MCNo>1</MCNo></Element></MachineEvent>`)
+
+	_, err := Parse(context.Background(), types.Request{
+		WatcherName: "J01_LNB_BOT",
+		FilePath:    "event.xml",
+		Content:     content,
+		Log:         log,
+		OutputDir:   outputDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outputDir, "J01_LNB_BOT.json"))
+	if err != nil {
+		t.Fatalf("read output state: %v", err)
+	}
+
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("parse output state: %v", err)
+	}
+
+	for _, machine := range []string{"machine_1", "machine_2", "machine_3", "machine_4"} {
+		if _, ok := state[machine]; !ok {
+			t.Fatalf("missing %s in output state", machine)
+		}
+	}
+
+	tower := state["machine_1"].(map[string]any)["tower"].(map[string]any)
+	aggregate := tower["state"].(map[string]any)
+	lastUpdate, ok := aggregate["last_update"].(string)
+	if !ok || lastUpdate == "" {
+		t.Fatalf("aggregate last_update missing: got %v", aggregate["last_update"])
+	}
+	if lastUpdate == "2026/05/21,15:42:49" {
+		t.Fatal("aggregate last_update used log timestamp instead of PC timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339, lastUpdate); err != nil {
+		t.Fatalf("aggregate last_update is not RFC3339: %v", err)
+	}
+	if aggregate["green"] != float64(1) {
+		t.Fatalf("aggregate green mismatch: got %v", aggregate["green"])
+	}
+
+	stageLane := tower["02_01"].(map[string]any)
+	if stageLane["last_update"] != lastUpdate {
+		t.Fatalf("stage lane last_update mismatch: got %v want %s", stageLane["last_update"], lastUpdate)
+	}
+	if stageLane["green"] != "01" || stageLane["red"] != "00" || stageLane["yellow"] != "00" || stageLane["buzzer"] != "00" {
+		t.Fatalf("stage lane state mismatch: %#v", stageLane)
+	}
 }
 
 func (l *captureLogger) Infof(format string, args ...any) {
